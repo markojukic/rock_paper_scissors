@@ -3,6 +3,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <thread>
+#include <optional>
 #include "network.hpp"
 #include "queue.hpp"
 
@@ -26,6 +27,7 @@ enum class Choice {
     rock,
     paper,
     scissors,
+    invalid,
 };
 
 enum MessageType: std::uint8_t {
@@ -63,36 +65,54 @@ struct Message {
     } data;
 };
 
+enum EventType {
+    server_connected,
+    server_disconnected,
+    client_connected,
+    client_disconnected,
+    user_choice,
+    message_received,
+};
+
+
+// Events sent to Game::run()
+struct Event {
+    EventType type;
+    union {
+        Choice choice;
+        Message message;
+    } data;
+};
+
 // Rock paper scissors game
 class Game {
     // Game states
     using State = unsigned; 
-    const static State condition_running            = 1 << 0;
-    const static State condition_server_connected   = 1 << 1;
-    const static State condition_client_connected   = 1 << 2;
+    const static State condition_server_connected   = 1 << 0;
+    const static State condition_client_connected   = 1 << 1;
+    const static State condition_user_choice_made   = 1 << 2;
+    const static State condition_user_announced     = 1 << 3;
+    const static State condition_opponent_announced = 1 << 4;
+    const static State condition_user_revealed      = 1 << 5;
+    const static State condition_opponent_revealed  = 1 << 6;
 
     const char *server_port, *client_host, *client_port;
     std::unique_ptr<Server> server;     // Server for incoming messages
     std::unique_ptr<Connection> client; // Connection for outgoing messages
     std::thread server_thread, client_thread, ui_thread;
     State state = 0;                    // Current state
-    std::mutex state_m;                 // Mutex for state variable
-    std::condition_variable state_cv;   // Notifications for state changes
-    Queue<Message> incoming_messages;   // Messages received from opponent
-    Queue<Message> outgoing_messages;   // Messages to be sent to opponent
-    Queue<Choice> choices;              // Player's game choices
+    // std::mutex state_m;                 // Mutex for state variable
+    // std::condition_variable state_cv;   // Notifications about state changes for Game::run
+    Queue<Event> event_queue;
+    Queue<std::optional<Message>> outgoing_messages;   // Messages to be sent to opponent
+    ChoiceMade user_choice_made, opponent_choice_made;
+    ChoiceReveal user_choice_reveal, opponent_choice_reveal;
 
     // Current score
-    unsigned int wins, losses;
+    unsigned int wins = 0, losses = 0;
 
     // Checks if all bits from condition are on
     inline bool check(State condition);
-
-    // Wait for next_condition while maintaining previous condition
-    // Returns
-    //  - true if next_condition was achieved without breaking previous_condition
-    //  - false if previous_condition was broken before achieving next_conditon
-    bool wait_for(const State previous_condition, const State next_condition);
 
     // Turn on bits from conditions
     void state_on(State conditions);
@@ -108,6 +128,9 @@ class Game {
 
     // Read user input and store in choices
     void run_ui();
+
+    // Reveal user's choice
+    void reveal();
 public:
     // Initialize a game
     Game(const char *server_port, const char *client_host, const char *client_port);

@@ -47,161 +47,211 @@ inline bool Game::check(State condition) {
     return (state & condition) == condition;
 }
 
-bool Game::wait_for(const State previous_condition, const State next_condition) { // Wait for next_condition while maintaining previous_condition
-    std::unique_lock lock(state_m);
-    state_cv.wait(lock, [&] {
-        return !check(previous_condition) || check(next_condition);
-    });
-    return check(previous_condition);
-}
-
 void Game::run_server() {
+    Event event;
     server = std::make_unique<Server>(server_port);
     server->listen();
     while (true) {
-        state_off(condition_server_connected);
         auto connection = server->accept();
-        state_on(condition_server_connected);
+        event.type = server_connected;
+        event_queue.put(event);
+
         while (true) {
             Message message;
             if (connection->recv(&message)) {
-                incoming_messages.put(message);
+                Event event;
+                event.type = message_received;
+                event.data.message = message;
+                event_queue.put(event);
             } else {
-                break; // client disconnected - reset score?
+                break;
             }
-            // std::cout << "Server received message" << std::endl;
-            // pass the message to incoming messages queue
         }
+        event.type = server_disconnected;
+        event_queue.put(event);
     }
 }
 
 void Game::state_on(State conditions) {
-    {
-        std::lock_guard lock(state_m);
-        state |= conditions;
-    }
-    state_cv.notify_all(); // notify_one?
+    state |= conditions;
 }
 
 void Game::state_off(State conditions) {
-    {
-        std::lock_guard lock(state_m);
-        state &= ~conditions;
-    }
-    state_cv.notify_all(); // notify_one?
+    state &= ~conditions;
 }
 
 void Game::run_client() {
+    Event event;
     while (true) {
-        state_off(condition_client_connected);
         try {
             client = std::make_unique<Connection>(client_host, client_port);
         } catch (const ConnectionError& e) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
-        state_on(condition_client_connected);
+        event.type = client_connected;
+        event_queue.put(event);
 
-        while (true) {
-            auto message = outgoing_messages.get();
-            client->send(&message);
+        // Detect when socket closes by reading all the time
+        auto client_recv_thread = std::thread([this]() {
+            struct {
+                char data[256];
+            } buffer;
+            while (true) {
+                if (!client->recv(&buffer)) {
+                    break;
+                }
+            }
+            outgoing_messages.put(std::nullopt);
+        });
+
+        for (std::optional<Message> message; message = outgoing_messages.get();) {
+            try {
+                client->send(&message.value());
+            } catch (const BrokenPipe& e) {
+                break;
+            }
         }
+        client_recv_thread.join();
+        outgoing_messages.clear();
+        event.type = client_disconnected;
+        event_queue.put(event);
     }
 }
 
+Choice to_choice(const std::string& s) {
+    if (s == "rock") {
+        return Choice::rock;
+    }
+    if (s == "paper") {
+        return Choice::paper;
+    }
+    if (s == "scissors") {
+        return Choice::scissors;
+    }
+    return Choice::invalid;
+}
+
+// Reads user's input
 void Game::run_ui() {
     std::string s;
     while (true) {
         std::cin >> s;
-        if (s == "rock") {
-            choices.put(Choice::rock);
-        }
-        else if (s == "paper") {
-            choices.put(Choice::paper);
-        }
-        else if (s == "scissors") {
-            choices.put(Choice::scissors);
+        if (auto choice = to_choice(s); choice != Choice::invalid) {
+            Event event;
+            event.type = user_choice;
+            event.data.choice = choice;
+            event_queue.put(event);
         }
     }
 }
 
-Game::Game(const char *server_port, const char *client_host, const char *client_port): server_port(server_port), client_host(client_host), client_port(client_port) {
+void Game::reveal() {
+    Message message;
+    message.message_type = choice_reveal;
+    message.data.choice_reveal = user_choice_reveal;
+    outgoing_messages.put(message);
 }
 
-void Game::run() { // Should be run only once?
-    state = condition_running;
+Game::Game(const char *server_port, const char *client_host, const char *client_port):
+    server_port(server_port),
+    client_host(client_host),
+    client_port(client_port) {}
+
+
+void Game::run() {
+    state = 0;
     ui_thread = std::thread(&Game::run_ui, this);
     server_thread = std::thread(&Game::run_server, this);
     client_thread = std::thread(&Game::run_client, this);
+    std::cout << "Connecting..." << std::endl;
     while (true) {
-        State previous_condition = condition_running;
-        State next_condition = previous_condition | condition_server_connected | condition_client_connected;
-        // std::cout << "Waiting for " << next_condition << '\n';
-        if (!wait_for(previous_condition, next_condition)) { // wait for client and server to connect
-            continue;
-        }
-        // Get user input
-        std::cout << "Make a choice: ";
-        std::cout.flush();
-        choices.clear();
-        auto choice = choices.get();
-        auto my_choice_reveal = ChoiceReveal(choice);
-        auto my_choice_made = ChoiceMade(my_choice_reveal);
-        Message message;
-        message.message_type = choice_made;
-        message.data.choice_made = my_choice_made;
-        outgoing_messages.put(message);
-
-        // Get opponent's choice
-        std::cout << "Waiting for opponent's choice" << std::endl;
-        ChoiceMade opponent_choice_made;
-        while (true) {
-            auto msg = incoming_messages.get();
-            if (msg.message_type == choice_made) {
-                opponent_choice_made = msg.data.choice_made;
-                break;
-            }
-        }
-
-        // Reveal my choice
-        message.message_type = choice_reveal;
-        message.data.choice_reveal = my_choice_reveal;
-        outgoing_messages.put(message);
-
-        std::cout << "Waiting for opponent's reveal" << std::endl;
-        // Wait for opponent's reveal
-        ChoiceReveal opponent_choice_reveal;
-        while (true) {
-            auto msg = incoming_messages.get();
-            if (msg.message_type == choice_reveal) {
-                opponent_choice_reveal = msg.data.choice_reveal;
-                break;
-            }
-        }
-
-        // Check opponent's reveal for validity
-        // Print opponent's choice
-        auto opponent_choice_made2 = ChoiceMade(opponent_choice_reveal);
-        if (!std::equal(opponent_choice_made.hash, opponent_choice_made.hash + DIGEST_SIZE, opponent_choice_made2.hash)) { // Hash invalid
-            std::cout << "Opponent's hash doesn't match.\nYOU WIN!\n";
-            ++wins; // wins.fetch_add(1);
-        }
-        else { // Hash valid
-            std::cout << "Opponent's choice: " << opponent_choice_reveal.choice << '\n';
-            int d = (3 + static_cast<int>(choice) - static_cast<int>(opponent_choice_reveal.choice)) % 3;
-            if (d == 1) {
-                std::cout << "YOU WIN!\n";
-                ++wins; // wins.fetch_add(1);
-            }
-            else if (d == 2) {
-                std::cout << "YOU LOSE!\n";
-                ++losses; // losses.fetch_add(1);
+        auto event = event_queue.get();
+        if (event.type == client_connected || event.type == server_connected) {
+            if (event.type == client_connected) {
+                state_on(condition_client_connected);
             }
             else {
-                std::cout << "TIE!\n";
+                state_on(condition_server_connected);
+            }
+            if (check(condition_client_connected | condition_server_connected)) {
+
+                std::cout << "Connected.\nMake a choice: " << std::flush;
             }
         }
-        std::cout << "Score: " << wins << " - " << losses << '\n';
-        // std::cout << "Score: " << wins.load() << " - " << losses.load() << '\n';
+        else if (event.type == client_disconnected || event.type == server_disconnected) {
+            if (check(condition_client_connected | condition_server_connected)) {
+                std::cout << "\nDisconnected, reconnecting..." << std::endl;
+            }
+            state &= condition_client_connected | condition_server_connected;
+            if (event.type == client_disconnected) {
+                state_off(condition_client_connected);
+            }
+            if (event.type == client_disconnected) {
+                state_off(condition_client_connected);
+            }
+            // Reset 
+            wins = losses = 0;
+        }
+        else if (event.type == user_choice) {
+            if (check(condition_client_connected | condition_server_connected) && !check(condition_user_choice_made)) {
+                user_choice_reveal = ChoiceReveal(event.data.choice);
+                user_choice_made = ChoiceMade(user_choice_reveal);
+                state_on(condition_user_choice_made);
+
+                Message message;
+                message.message_type = choice_made;
+                message.data.choice_made = user_choice_made;
+                outgoing_messages.put(message);
+
+                // Reveal user's choice if opponent already announced his
+                if (check(condition_opponent_announced)) {
+                    reveal();
+                }
+            }
+        }
+        else if (event.type == message_received) {
+            if (event.data.message.message_type == MessageType::choice_made && !check(condition_opponent_announced)) {
+                opponent_choice_made = event.data.message.data.choice_made;
+                state_on(condition_opponent_announced);
+
+                // Reveal user's choice
+                if (check(condition_user_choice_made)) {
+                    reveal();
+                }
+            }
+            else if (event.data.message.message_type == MessageType::choice_reveal && check(condition_opponent_announced)) {
+                opponent_choice_reveal = event.data.message.data.choice_reveal;
+                auto opponent_choice_made2 = ChoiceMade(opponent_choice_reveal);
+
+                // Check HMAC validity
+                if (!std::equal(opponent_choice_made.hash, opponent_choice_made.hash + DIGEST_SIZE, opponent_choice_made2.hash)) {
+                    // Hash invalid
+                    std::cout << "Opponent's hash doesn't match.\nYOU WIN!" << std::endl;
+                    ++wins;
+                }
+                else {
+                    // Hash valid
+                    std::cout << "Opponent's choice: " << opponent_choice_reveal.choice << std::endl;
+                    int d = (3 + static_cast<int>(user_choice_reveal.choice) - static_cast<int>(opponent_choice_reveal.choice)) % 3;
+                    if (d == 1) {
+                        std::cout << "YOU WIN!" << std::endl;
+                        ++wins;
+                    }
+                    else if (d == 2) {
+                        std::cout << "YOU LOSE!" << std::endl;
+                        ++losses;
+                    }
+                    else {
+                        std::cout << "TIE!" << std::endl;
+                    }
+                }
+                std::cout << "Score: " << wins << " - " << losses << std::endl;
+
+                // Next round
+                state = condition_client_connected | condition_server_connected;
+                std::cout << "Make a choice: " << std::flush;
+            }
+        }
     }
 }
