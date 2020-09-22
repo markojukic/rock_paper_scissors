@@ -1,6 +1,7 @@
 *
 !.gitignore
 !README.md
+!demo.svg
 !CMakeLists.txt
 !/src
 !/src/*
