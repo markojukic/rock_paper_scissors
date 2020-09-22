@@ -6,10 +6,16 @@
 #include "util.hpp"
 
 
-// When a connection to server fails
+// Thrown when a connection to server fails
 class ConnectionError: public std::runtime_error {
 public:
     ConnectionError();
+};
+
+// Thrown when send() fails because socket has been closed
+class BrokenPipe: public std::runtime_error {
+public:
+    BrokenPipe();
 };
 
 

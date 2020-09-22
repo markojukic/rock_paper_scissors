@@ -9,6 +9,11 @@
 ConnectionError::ConnectionError(): std::runtime_error("failed to connect") {
 };
 
+
+BrokenPipe::BrokenPipe(): std::runtime_error("broken pipe") {
+};
+
+
 void init(const char* host, const char* port, int& socket_fd, sockaddr_storage& addr) {
     addrinfo hints = {};
     hints.ai_family = AF_UNSPEC;        // Use IPv4 or IPv6
@@ -54,7 +59,7 @@ void init(const char* host, const char* port, int& socket_fd, sockaddr_storage& 
                 if (close(socket_fd) == -1) {
                     std::cerr << strerror("close") << '\n';
                 }
-                std::cerr << strerror("client: connect") << '\n';
+                // std::cerr << strerror("client: connect") << '\n';
                 continue;
             }
         }
@@ -87,7 +92,10 @@ Connection::~Connection() {
 void Connection::send(const char* buf, const size_t len) {
     size_t sent = 0; // Bytes sent counter
     while(sent < len) {
-        if (int n = ::send(socket_fd, buf+sent, len-sent, 0); n == -1) {
+        if (int n = ::send(socket_fd, buf+sent, len-sent, MSG_NOSIGNAL); n == -1) {
+            if (errno == EPIPE) {
+                throw BrokenPipe();
+            }
             throw std::runtime_error(strerror("send"));
         } else {
             sent += n;
