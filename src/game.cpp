@@ -8,13 +8,30 @@
 
 // Convert choice to string
 std::ostream& operator<<(std::ostream &os, const Choice &choice) { 
-    if (choice == Choice::rock) {
+    switch (choice) {
+    case Choice::rock:
         return os << "rock";
-    }
-    if (choice == Choice::paper) {
+    case Choice::paper:
         return os << "paper";
+    case Choice::scissors:
+        return os << "scissors";
+    default:
+        return os << "invalid";
     }
-    return os << "scissors";
+}
+
+// Convert string to choice
+Choice to_choice(const std::string& s) {
+    if (s == "rock") {
+        return Choice::rock;
+    }
+    if (s == "paper") {
+        return Choice::paper;
+    }
+    if (s == "scissors") {
+        return Choice::scissors;
+    }
+    return Choice::invalid;
 }
 
 ChoiceReveal::ChoiceReveal(Choice choice): choice(choice) {
@@ -119,30 +136,14 @@ void Game::run_client() {
     }
 }
 
-Choice to_choice(const std::string& s) {
-    if (s == "rock") {
-        return Choice::rock;
-    }
-    if (s == "paper") {
-        return Choice::paper;
-    }
-    if (s == "scissors") {
-        return Choice::scissors;
-    }
-    return Choice::invalid;
-}
-
-// Reads user's input
 void Game::run_ui() {
     std::string s;
+    Event event;
+    event.type = user_choice;
     while (true) {
         std::cin >> s;
-        if (auto choice = to_choice(s); choice != Choice::invalid) {
-            Event event;
-            event.type = user_choice;
-            event.data.choice = choice;
-            event_queue.put(event);
-        }
+        event.data.choice = to_choice(s);
+        event_queue.put(event);
     }
 }
 
@@ -151,6 +152,7 @@ void Game::reveal() {
     message.message_type = choice_reveal;
     message.data.choice_reveal = user_choice_reveal;
     outgoing_messages.put(message);
+    state_on(condition_user_revealed);
 }
 
 Game::Game(const char *server_port, const char *client_host, const char *client_port):
@@ -158,9 +160,7 @@ Game::Game(const char *server_port, const char *client_host, const char *client_
     client_host(client_host),
     client_port(client_port) {}
 
-
 void Game::run() {
-    state = 0;
     ui_thread = std::thread(&Game::run_ui, this);
     server_thread = std::thread(&Game::run_server, this);
     client_thread = std::thread(&Game::run_client, this);
@@ -175,8 +175,7 @@ void Game::run() {
                 state_on(condition_server_connected);
             }
             if (check(condition_client_connected | condition_server_connected)) {
-
-                std::cout << "Connected.\nMake a choice: " << std::flush;
+                std::cout << "Connected.\n\nMake a choice: " << std::flush;
             }
         }
         else if (event.type == client_disconnected || event.type == server_disconnected) {
@@ -187,14 +186,18 @@ void Game::run() {
             if (event.type == client_disconnected) {
                 state_off(condition_client_connected);
             }
-            if (event.type == client_disconnected) {
-                state_off(condition_client_connected);
+            else {
+                state_off(condition_server_connected);
             }
             // Reset 
             wins = losses = 0;
         }
         else if (event.type == user_choice) {
             if (check(condition_client_connected | condition_server_connected) && !check(condition_user_choice_made)) {
+                if (event.data.choice == Choice::invalid) {
+                    std::cout << "Make a choice: " << std::flush;
+                    continue;
+                }
                 user_choice_reveal = ChoiceReveal(event.data.choice);
                 user_choice_made = ChoiceMade(user_choice_reveal);
                 state_on(condition_user_choice_made);
@@ -246,7 +249,7 @@ void Game::run() {
                         std::cout << "TIE!" << std::endl;
                     }
                 }
-                std::cout << "Score: " << wins << " - " << losses << std::endl;
+                std::cout << "Score: " << wins << " - " << losses << '\n' << std::endl;
 
                 // Next round
                 state = condition_client_connected | condition_server_connected;

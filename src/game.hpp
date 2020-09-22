@@ -7,19 +7,17 @@
 #include "network.hpp"
 #include "queue.hpp"
 
-#define SHA256              1
-#define SHA512              2
-#define SHA256_DIGEST_SIZE  32
-#define SHA512_DIGEST_SIZE  64
+#define SHA256 1
+#define SHA512 2
 
 #define SECRET_LENGTH   64      // Length of randomly generated secret keys
-#define CHF             SHA256  // Cryptographic hash function
+#define CHF             SHA256  // Cryptographic hash function - must match opponent's
 
 #if CHF == SHA256
-    #define DIGEST_SIZE SHA256_DIGEST_SIZE
+    #define DIGEST_SIZE 32
     #define EVP_DIGEST EVP_sha256
 #elif CHF == SHA512
-    #define DIGEST_SIZE SHA512_DIGEST_SIZE
+    #define DIGEST_SIZE 64
     #define EVP_DIGEST EVP_sha512
 #endif
 
@@ -65,6 +63,7 @@ struct Message {
     } data;
 };
 
+// Types of events sent to Game:run()
 enum EventType {
     server_connected,
     server_disconnected,
@@ -73,7 +72,6 @@ enum EventType {
     user_choice,
     message_received,
 };
-
 
 // Events sent to Game::run()
 struct Event {
@@ -91,20 +89,17 @@ class Game {
     const static State condition_server_connected   = 1 << 0;
     const static State condition_client_connected   = 1 << 1;
     const static State condition_user_choice_made   = 1 << 2;
-    const static State condition_user_announced     = 1 << 3;
-    const static State condition_opponent_announced = 1 << 4;
-    const static State condition_user_revealed      = 1 << 5;
-    const static State condition_opponent_revealed  = 1 << 6;
+    const static State condition_opponent_announced = 1 << 3;
+    const static State condition_user_revealed      = 1 << 4;
+    State state = 0; // Current state
 
     const char *server_port, *client_host, *client_port;
     std::unique_ptr<Server> server;     // Server for incoming messages
     std::unique_ptr<Connection> client; // Connection for outgoing messages
     std::thread server_thread, client_thread, ui_thread;
-    State state = 0;                    // Current state
-    // std::mutex state_m;                 // Mutex for state variable
-    // std::condition_variable state_cv;   // Notifications about state changes for Game::run
-    Queue<Event> event_queue;
-    Queue<std::optional<Message>> outgoing_messages;   // Messages to be sent to opponent
+
+    Queue<Event> event_queue;                           // Events handled by Game::run()
+    Queue<std::optional<Message>> outgoing_messages;    // Messages to sent to opponent by Game::run_client()
     ChoiceMade user_choice_made, opponent_choice_made;
     ChoiceReveal user_choice_reveal, opponent_choice_reveal;
 
@@ -120,13 +115,13 @@ class Game {
     // Turn off bits from conditions
     void state_off(State conditions);
 
-    // Receive messages and store them in incoming_messages
+    // Receive messages from opponent
     void run_server();
 
-    // Send messages from outgoing_messages
+    // Send messages from outgoing_messages to opponent
     void run_client();
 
-    // Read user input and store in choices
+    // Read user input
     void run_ui();
 
     // Reveal user's choice
